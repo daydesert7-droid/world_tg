@@ -1,173 +1,43 @@
-import logging
-import time
-import sys
 import os
-import threading
+import logging
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
+import time
 
+# Загружаем переменные окружения
 load_dotenv()
 
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Получаем токен из переменных окружения
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-CREATOR_ID = os.environ.get('CREATOR_ID')
+CREATOR_ID = os.environ.get('CREATOR_ID', '2037455253')
 
-# ВАЖНО: Проверка наличия токена перед запуском
+# Проверка токена
 if not TOKEN:
-    print("❌ ОШИБКА: TELEGRAM_BOT_TOKEN не установлен в переменных окружения!")
-    print("Добавьте переменную TELEGRAM_BOT_TOKEN в настройках Render")
-    sys.exit(1)
+    logger.error("❌ ОШИБКА: TELEGRAM_BOT_TOKEN не установлен!")
+    logger.error("Добавьте переменную TELEGRAM_BOT_TOKEN в настройках Render")
+    exit(1)
 
-LOG_CLEANUP_HOURS = 24
-LOG_RETENTION_DAYS = 7
-HEARTBEAT_INTERVAL = 300
+# Временное хранилище в памяти (вместо SQLite)
+user_limits = {}
 
-os.makedirs('logs', exist_ok=True)
-os.makedirs('logs/archive', exist_ok=True)
-
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
-
-# Настройка логгера
-log_formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-
-# Основной обработчик логов
-main_log_handler = RotatingFileHandler(
-    'logs/bot_main.log',
-    maxBytes=5*1024*1024,
-    backupCount=10
-)
-main_log_handler.setFormatter(log_formatter)
-
-# Обработчик ошибок
-error_log_handler = RotatingFileHandler(
-    'logs/bot_errors.log',
-    maxBytes=2*1024*1024,
-    backupCount=5
-)
-error_log_handler.setFormatter(log_formatter)
-error_log_handler.setLevel(logging.ERROR)
-
-# Консольный обработчик
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(log_formatter)
-
-# Настройка корневого логгера
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-logger.addHandler(main_log_handler)
-logger.addHandler(error_log_handler)
-logger.addHandler(console_handler)
-
-bot_logger = logging.getLogger(__name__)
-
-class BotMonitor:
-    """Мониторинг и обслуживание бота"""
-
-    def __init__(self):
-        self.start_time = time.time()
-        self.message_count = 0
-        self.last_cleanup = time.time()
-        self.last_heartbeat = time.time()
-        self.running = True
-
-    def increment_message_count(self):
-        self.message_count += 1
-
-    def get_uptime(self):
-        uptime = time.time() - self.start_time
-        hours = int(uptime // 3600)
-        minutes = int((uptime % 3600) // 60)
-        seconds = int(uptime % 60)
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-    def cleanup_old_logs(self):
-        """Очистка старых логов"""
-        try:
-            current_time = time.time()
-            cutoff_time = current_time - (LOG_RETENTION_DAYS * 86400)
-
-            deleted_count = 0
-            for filename in os.listdir('logs'):
-                if filename.endswith('.log'):
-                    filepath = os.path.join('logs', filename)
-                    if os.path.getmtime(filepath) < cutoff_time:
-                        try:
-                            os.remove(filepath)
-                            deleted_count += 1
-                            bot_logger.info(f"Удален старый лог: {filename}")
-                        except Exception as e:
-                            bot_logger.warning(f"Не удалось удалить {filename}: {e}")
-
-            # Архивируем текущий основной лог если он больше 1MB
-            main_log_path = 'logs/bot_main.log'
-            if os.path.exists(main_log_path) and os.path.getsize(main_log_path) > 1024*1024:
-                try:
-                    # Используем time.time() для имени файла вместо datetime
-                    timestamp = int(time.time())
-                    archive_name = f"logs/archive/bot_main_{timestamp}.log"
-                    os.rename(main_log_path, archive_name)
-                    bot_logger.info(f"Основной лог заархивирован: {archive_name}")
-                except Exception as e:
-                    bot_logger.error(f"Ошибка архивации лога: {e}")
-
-            self.last_cleanup = current_time
-            if deleted_count > 0:
-                bot_logger.info(f"Очистка логов завершена. Удалено: {deleted_count} файлов")
-
-        except Exception as e:
-            bot_logger.error(f"Ошибка при очистке логов: {e}")
-
-    def send_heartbeat(self):
-        """Отправка heartbeat для поддержания активности"""
-        try:
-            uptime = self.get_uptime()
-            log_size = 0
-            if os.path.exists('logs/bot_main.log'):
-                log_size = os.path.getsize('logs/bot_main.log') / 1024
-            
-            # Форматируем текущее время без datetime
-            current_time = time.strftime('%Y-%m-%d %H:%M:%S')
-            
-            stats = (f"🤖 Бот работает\n"
-                    f"⏱ Время работы: {uptime}\n"
-                    f"📊 Сообщений обработано: {self.message_count}\n"
-                    f"💾 Лог: {log_size:.1f} KB\n"
-                    f"🕒 Текущее время: {current_time}")
-
-            bot_logger.info(f"Heartbeat: {stats}")
-            self.last_heartbeat = time.time()
-
-        except Exception as e:
-            bot_logger.error(f"Ошибка heartbeat: {e}")
-
-# Глобальный монитор
-monitor = BotMonitor()
-
-def schedule_cleanup():
-    """Планировщик очистки логов"""
-    while monitor.running:
-        try:
-            current_time = time.time()
-
-            # Проверяем нужно ли очистить логи
-            if current_time - monitor.last_cleanup > (LOG_CLEANUP_HOURS * 3600):
-                monitor.cleanup_old_logs()
-
-            # Отправляем heartbeat
-            if current_time - monitor.last_heartbeat > HEARTBEAT_INTERVAL:
-                monitor.send_heartbeat()
-
-            time.sleep(60)
-
-        except Exception as e:
-            bot_logger.error(f"Ошибка в планировщике: {e}")
-            time.sleep(300)
-
-def format_time_remaining(hours, minutes):
+def format_time_remaining(seconds):
+    """Форматирование времени оставшегося до следующего сообщения"""
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    
     if hours > 0:
         if hours == 1 or hours == 21:
             hours_text = f"{hours} час"
@@ -175,6 +45,8 @@ def format_time_remaining(hours, minutes):
             hours_text = f"{hours} часа"
         else:
             hours_text = f"{hours} часов"
+    else:
+        hours_text = ""
 
     if minutes > 0:
         if minutes == 1 or minutes == 21 or minutes == 31 or minutes == 41 or minutes == 51:
@@ -185,6 +57,8 @@ def format_time_remaining(hours, minutes):
             minutes_text = f"{minutes} минуты"
         else:
             minutes_text = f"{minutes} минут"
+    else:
+        minutes_text = ""
 
     if hours > 0 and minutes > 0:
         return f"{hours_text} {minutes_text}"
@@ -195,75 +69,50 @@ def format_time_remaining(hours, minutes):
     else:
         return "0 минут"
 
-# Временное хранилище в памяти (вместо SQLite)
-# ВНИМАНИЕ: данные сбросятся при перезапуске бота!
-user_limits = {}
-
 def can_send_message(user_id):
     """Проверяет, может ли пользователь отправить сообщение"""
-    try:
-        user_id_str = str(user_id)
-        
-        if user_id_str not in user_limits:
-            return True
+    user_id_str = str(user_id)
+    
+    if user_id_str not in user_limits:
+        return True
 
-        last_message_time = user_limits[user_id_str]
-        current_time = int(time.time())
+    last_message_time = user_limits[user_id_str]
+    current_time = int(time.time())
 
-        return (current_time - last_message_time) >= 86400
-    except Exception as e:
-        bot_logger.error(f"Ошибка проверки лимита для user {user_id}: {e}")
-        return True  # В случае ошибки разрешаем отправить сообщение
+    return (current_time - last_message_time) >= 86400
 
 def save_message_time(user_id):
-    """Сохраняет время отправки сообщения пользователем"""
-    try:
-        user_id_str = str(user_id)
-        current_time = int(time.time())
-        user_limits[user_id_str] = current_time
-        bot_logger.info(f"Сохранено время для пользователя {user_id}")
-    except Exception as e:
-        bot_logger.error(f"Ошибка сохранения времени для user {user_id}: {e}")
+    """Сохраняет время отправки сообщения"""
+    user_id_str = str(user_id)
+    current_time = int(time.time())
+    user_limits[user_id_str] = current_time
+    logger.info(f"Сохранено время для пользователя {user_id}")
 
 def get_time_until_next_message(user_id):
-    """Возвращает оставшееся время до возможности отправить следующее сообщение"""
-    try:
-        user_id_str = str(user_id)
-        
-        if user_id_str not in user_limits:
-            return 0, 0
+    """Возвращает оставшееся время до следующего сообщения в секундах"""
+    user_id_str = str(user_id)
+    
+    if user_id_str not in user_limits:
+        return 0
 
-        last_message_time = user_limits[user_id_str]
-        current_time = int(time.time())
-        time_passed = current_time - last_message_time
+    last_message_time = user_limits[user_id_str]
+    current_time = int(time.time())
+    time_passed = current_time - last_message_time
 
-        if time_passed >= 86400:
-            return 0, 0
+    if time_passed >= 86400:
+        return 0
 
-        time_remaining = 86400 - time_passed
-
-        hours = time_remaining // 3600
-        minutes = (time_remaining % 3600) // 60
-
-        if time_remaining % 60 > 0:
-            minutes += 1
-            if minutes == 60:
-                hours += 1
-                minutes = 0
-
-        return hours, minutes
-    except Exception as e:
-        bot_logger.error(f"Ошибка расчета времени для user {user_id}: {e}")
-        return 24, 0  # В случае ошибки возвращаем полный период
+    return 86400 - time_passed
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         'Добро пожаловать!\n\n'
         'Отправь мне текстовое сообщение, и оно опубликуется в канал "мир знает, что".\n\n'
     )
-    await update.message.reply_text(welcome_text)
+     await update.message.reply_text(welcome_text)
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений"""
     user = update.effective_user
     user_id = user.id
 
@@ -277,7 +126,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"{time_text}"
         )
 
-        await update.message.reply_text(limit_text)
+        await update.message.reply_text(limit_text, parse_mode='Markdown')
         return
 
     if not update.message.text or update.message.text.isspace():
@@ -306,30 +155,26 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     except Exception as e:
-        await update.message.reply_text("Произошла ошибка.")
+        logger.error(f"Ошибка при отправке сообщения создателю: {e}")
+        await update.message.reply_text("⚠ Произошла ошибка при обработке сообщения.")
 
 async def handle_unsupported_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Принимаются только текстовые сообщения.")
+    """Обработчик неподдерживаемых типов сообщений"""
+    await update.message.reply_text(
+        "❌ Принимаются только текстовые сообщения.\n\n"
+        "📝 Отправьте текст, и он будет опубликован в канале."
+    )
 
-def main():
-    """Основная функция запуска бота"""
+async def main():
+    """Основная асинхронная функция запуска бота"""
     try:
-        # Форматируем время запуска без datetime
-        start_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+        logger.info("=" * 50)
+        logger.info("🚀 Запуск Telegram бота")
+        logger.info(f"⏰ Время запуска: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 50)
         
-        bot_logger.info("=" * 50)
-        bot_logger.info("🚀 Запуск Telegram бота")
-        bot_logger.info(f"⏰ Время запуска: {start_time_str}")
-        bot_logger.info("=" * 50)
-        
-        # Проверка токена
-        if not TOKEN or TOKEN == 'your_bot_token_here':
-            bot_logger.error("❌ Токен бота не установлен!")
-            bot_logger.error("Добавьте TELEGRAM_BOT_TOKEN в переменные окружения Render")
-            return
-        
-        bot_logger.info(f"✅ Токен получен (длина: {len(TOKEN)})")
-        bot_logger.info(f"👤 ID создателя: {CREATOR_ID}")
+        logger.info(f"✅ Токен получен (длина: {len(TOKEN)})")
+        logger.info(f"👤 ID создателя: {CREATOR_ID}")
         
         # Создание приложения
         application = Application.builder().token(TOKEN).build()
@@ -347,29 +192,23 @@ def main():
             handle_unsupported_message
         ))
         
-        # Запуск планировщика очистки в отдельном потоке
-        cleanup_thread = threading.Thread(target=schedule_cleanup, daemon=True)
-        cleanup_thread.start()
-        bot_logger.info("✅ Планировщик очистки логов запущен")
+        logger.info(f"📊 Пользователей в памяти: {len(user_limits)}")
+        logger.info("✅ Бот запущен и готов к работе")
+        logger.info("🔄 Запуск polling...")
         
-        bot_logger.info(f"📊 Пользователей в памяти: {len(user_limits)}")
-        bot_logger.info("✅ Бот запущен и готов к работе")
-        
-        # Запуск бота с перезапуском при ошибках
-        bot_logger.info("🔄 Запуск polling...")
-        application.run_polling(
+        # Запуск polling
+        await application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
             close_loop=False
         )
         
     except KeyboardInterrupt:
-        bot_logger.info("⏹ Остановка бота по запросу пользователя")
-        monitor.running = False
+        logger.info("⏹ Остановка бота по запросу пользователя")
     except Exception as e:
-        bot_logger.error(f"💥 Критическая ошибка при запуске: {e}")
+        logger.error(f"💥 Критическая ошибка при запуске: {e}")
         import traceback
-        bot_logger.error(traceback.format_exc())
-        
+        logger.error(traceback.format_exc())
+
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
