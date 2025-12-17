@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Получаем токен из переменных окружения
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-CREATOR_ID = os.environ.get('CREATOR_ID', '2037455253')
+CREATOR_ID = os.environ.get('CREATOR_ID')
 
 # Проверка токена
 if not TOKEN:
@@ -105,21 +105,21 @@ def get_time_until_next_message(user_id):
     return 86400 - time_passed
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
     welcome_text = (
         'Добро пожаловать!\n\n'
-        'Отправь мне текстовое сообщение, и оно опубликуется в канал "мир знает, что".\n\n'
+        'Отправь мне текстовое сообщение, и оно опубликуется в канал "мир знает, что".'
     )
-     await update.message.reply_text(welcome_text)
+    await update.message.reply_text(welcome_text)
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     user = update.effective_user
     user_id = user.id
-
+    
     if not can_send_message(user_id):
-        hours, minutes = get_time_until_next_message(user_id)
-
-        time_text = format_time_remaining(hours, minutes)
+        seconds_left = get_time_until_next_message(user_id)
+        time_text = format_time_remaining(seconds_left)
 
         limit_text = (
             f"Следующее сообщение можно отправить через:\n"
@@ -135,11 +135,16 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     save_message_time(user_id)
 
-    await update.message.reply_text("Сообщение отправлено. Опубликуется в порядке очереди.")
+    await update.message.reply_text(
+        "Сообщение отправлено. Опубликуется в порядке очереди."
+    )
 
     try:
         user_info = f"@{user.username}" if user.username else f"ID: {user.id}"
-
+        
+        # Получаем текущее время в формате строки
+        current_time = time.strftime('%Y-%m-%d %H:%M:%S')
+        
         message_to_creator = (
             f"Новое сообщение от {user_info}:"
         )
@@ -154,6 +159,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             text=update.message.text
         )
 
+        logger.info(f"Сообщение от пользователя {user_id} отправлено создателю")
+
     except Exception as e:
         logger.error(f"Ошибка при отправке сообщения создателю: {e}")
         await update.message.reply_text("⚠ Произошла ошибка при обработке сообщения.")
@@ -161,8 +168,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_unsupported_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик неподдерживаемых типов сообщений"""
     await update.message.reply_text(
-        "❌ Принимаются только текстовые сообщения.\n\n"
-        "📝 Отправьте текст, и он будет опубликован в канале."
+        "Принимаются только текстовые сообщения."
     )
 
 async def main():
