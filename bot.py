@@ -1,9 +1,7 @@
 import logging
-import sqlite3
 import time
 import sys
 import os
-import datetime
 import threading
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -15,6 +13,7 @@ load_dotenv()
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CREATOR_ID = os.environ.get('CREATOR_ID')
 
+# ВАЖНО: Проверка наличия токена перед запуском
 if not TOKEN:
     print("❌ ОШИБКА: TELEGRAM_BOT_TOKEN не установлен в переменных окружения!")
     print("Добавьте переменную TELEGRAM_BOT_TOKEN в настройках Render")
@@ -107,7 +106,9 @@ class BotMonitor:
             main_log_path = 'logs/bot_main.log'
             if os.path.exists(main_log_path) and os.path.getsize(main_log_path) > 1024*1024:
                 try:
-                    archive_name = f"logs/archive/bot_main_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+                    # Используем time.time() для имени файла вместо datetime
+                    timestamp = int(time.time())
+                    archive_name = f"logs/archive/bot_main_{timestamp}.log"
                     os.rename(main_log_path, archive_name)
                     bot_logger.info(f"Основной лог заархивирован: {archive_name}")
                 except Exception as e:
@@ -128,10 +129,14 @@ class BotMonitor:
             if os.path.exists('logs/bot_main.log'):
                 log_size = os.path.getsize('logs/bot_main.log') / 1024
             
+            # Форматируем текущее время без datetime
+            current_time = time.strftime('%Y-%m-%d %H:%M:%S')
+            
             stats = (f"🤖 Бот работает\n"
                     f"⏱ Время работы: {uptime}\n"
                     f"📊 Сообщений обработано: {self.message_count}\n"
-                    f"💾 Лог: {log_size:.1f} KB")
+                    f"💾 Лог: {log_size:.1f} KB\n"
+                    f"🕒 Текущее время: {current_time}")
 
             bot_logger.info(f"Heartbeat: {stats}")
             self.last_heartbeat = time.time()
@@ -190,42 +195,19 @@ def format_time_remaining(hours, minutes):
     else:
         return "0 минут"
 
-def init_database():
-    try:
-        conn = sqlite3.connect('user_limits.db')
-        cursor = conn.cursor()
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_limits (
-                user_id INTEGER PRIMARY KEY,
-                last_message_time INTEGER
-            )
-        ''')
-
-        conn.commit()
-        conn.close()
-        bot_logger.info("✅ База данных инициализирована")
-    except Exception as e:
-        bot_logger.error(f"❌ Ошибка инициализации базы данных: {e}")
-        # Не завершаем работу, пробуем продолжить
+# Временное хранилище в памяти (вместо SQLite)
+# ВНИМАНИЕ: данные сбросятся при перезапуске бота!
+user_limits = {}
 
 def can_send_message(user_id):
+    """Проверяет, может ли пользователь отправить сообщение"""
     try:
-        conn = sqlite3.connect('user_limits.db')
-        cursor = conn.cursor()
-
-        cursor.execute(
-            'SELECT last_message_time FROM user_limits WHERE user_id = ?',
-            (user_id,)
-        )
-
-        result = cursor.fetchone()
-        conn.close()
-
-        if result is None:
+        user_id_str = str(user_id)
+        
+        if user_id_str not in user_limits:
             return True
 
-        last_message_time = result[0]
+        last_message_time = user_limits[user_id_str]
         current_time = int(time.time())
 
         return (current_time - last_message_time) >= 86400
@@ -234,39 +216,24 @@ def can_send_message(user_id):
         return True  # В случае ошибки разрешаем отправить сообщение
 
 def save_message_time(user_id):
+    """Сохраняет время отправки сообщения пользователем"""
     try:
-        conn = sqlite3.connect('user_limits.db')
-        cursor = conn.cursor()
-
+        user_id_str = str(user_id)
         current_time = int(time.time())
-
-        cursor.execute('''
-            INSERT OR REPLACE INTO user_limits (user_id, last_message_time)
-            VALUES (?, ?)
-        ''', (user_id, current_time))
-
-        conn.commit()
-        conn.close()
+        user_limits[user_id_str] = current_time
+        bot_logger.info(f"Сохранено время для пользователя {user_id}")
     except Exception as e:
         bot_logger.error(f"Ошибка сохранения времени для user {user_id}: {e}")
 
 def get_time_until_next_message(user_id):
+    """Возвращает оставшееся время до возможности отправить следующее сообщение"""
     try:
-        conn = sqlite3.connect('user_limits.db')
-        cursor = conn.cursor()
-
-        cursor.execute(
-            'SELECT last_message_time FROM user_limits WHERE user_id = ?',
-            (user_id,)
-        )
-
-        result = cursor.fetchone()
-        conn.close()
-
-        if result is None:
+        user_id_str = str(user_id)
+        
+        if user_id_str not in user_limits:
             return 0, 0
 
-        last_message_time = result[0]
+        last_message_time = user_limits[user_id_str]
         current_time = int(time.time())
         time_passed = current_time - last_message_time
 
@@ -345,26 +312,15 @@ async def handle_unsupported_message(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text("Принимаются только текстовые сообщения.")
 
 def main():
+    """Основная функция запуска бота"""
     try:
+        # Форматируем время запуска без datetime
+        start_time_str = time.strftime('%Y-%m-%d %H:%M:%S')
+        
         bot_logger.info("=" * 50)
         bot_logger.info("🚀 Запуск Telegram бота")
-        bot_logger.info(f"⏰ Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        bot_logger.info(f"⏰ Время запуска: {start_time_str}")
         bot_logger.info("=" * 50)
-        
-        # Инициализация базы данных
-        init_database()
-        
-        # Оптимизация БД
-        try:
-            conn = sqlite3.connect('user_limits.db')
-            cursor = conn.cursor()
-            cursor.execute('PRAGMA optimize')
-            cursor.execute('PRAGMA journal_mode=WAL')
-            conn.commit()
-            conn.close()
-            bot_logger.info("✅ База данных оптимизирована")
-        except Exception as e:
-            bot_logger.warning(f"Не удалось оптимизировать БД: {e}")
         
         # Проверка токена
         if not TOKEN or TOKEN == 'your_bot_token_here':
@@ -373,6 +329,7 @@ def main():
             return
         
         bot_logger.info(f"✅ Токен получен (длина: {len(TOKEN)})")
+        bot_logger.info(f"👤 ID создателя: {CREATOR_ID}")
         
         # Создание приложения
         application = Application.builder().token(TOKEN).build()
@@ -395,8 +352,8 @@ def main():
         cleanup_thread.start()
         bot_logger.info("✅ Планировщик очистки логов запущен")
         
+        bot_logger.info(f"📊 Пользователей в памяти: {len(user_limits)}")
         bot_logger.info("✅ Бот запущен и готов к работе")
-        bot_logger.info(f"👤 ID создателя: {CREATOR_ID}")
         
         # Запуск бота с перезапуском при ошибках
         bot_logger.info("🔄 Запуск polling...")
@@ -413,6 +370,6 @@ def main():
         bot_logger.error(f"💥 Критическая ошибка при запуске: {e}")
         import traceback
         bot_logger.error(traceback.format_exc())
-
+        
 if __name__ == '__main__':
     main()
